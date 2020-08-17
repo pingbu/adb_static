@@ -1188,70 +1188,6 @@ void build_local_name(char* target_str, size_t target_size, int server_port)
   snprintf(target_str, target_size, "tcp:%d", server_port);
 }
 
-#if !ADB_HOST
-
-static void drop_capabilities_bounding_set_if_needed() {
-#ifdef ALLOW_ADBD_ROOT
-    char value[PROPERTY_VALUE_MAX];
-    property_get("ro.debuggable", value, "");
-    if (strcmp(value, "1") == 0) {
-        return;
-    }
-#endif
-    int i;
-    for (i = 0; prctl(PR_CAPBSET_READ, i, 0, 0, 0) >= 0; i++) {
-        if (i == CAP_SETUID || i == CAP_SETGID) {
-            // CAP_SETUID CAP_SETGID needed by /system/bin/run-as
-            continue;
-        }
-        int err = prctl(PR_CAPBSET_DROP, i, 0, 0, 0);
-
-        // Some kernels don't have file capabilities compiled in, and
-        // prctl(PR_CAPBSET_DROP) returns EINVAL. Don't automatically
-        // die when we see such misconfigured kernels.
-        if ((err < 0) && (errno != EINVAL)) {
-            exit(1);
-        }
-    }
-}
-
-static int should_drop_privileges() {
-#ifndef ALLOW_ADBD_ROOT
-    return 1;
-#else /* ALLOW_ADBD_ROOT */
-    int secure = 0;
-    char value[PROPERTY_VALUE_MAX];
-
-   /* run adbd in secure mode if ro.secure is set and
-    ** we are not in the emulator
-    */
-    property_get("ro.kernel.qemu", value, "");
-    if (strcmp(value, "1") != 0) {
-        property_get("ro.secure", value, "1");
-        if (strcmp(value, "1") == 0) {
-            // don't run as root if ro.secure is set...
-            secure = 1;
-
-            // ... except we allow running as root in userdebug builds if the
-            // service.adb.root property has been set by the "adb root" command
-            property_get("ro.debuggable", value, "");
-            if (strcmp(value, "1") == 0) {
-                property_get("service.adb.root", value, "");
-                if (strcmp(value, "1") == 0) {
-                    secure = 0;
-                }
-            }
-        }
-    }
-	property_get("sys.rkadb.root", value, "");
-     if (strcmp(value, "1") == 0) {
-             secure =0;
-		}
-    return secure;
-#endif /* ALLOW_ADBD_ROOT */
-}
-#endif /* !ADB_HOST */
-
 int adb_main(int is_daemon, int server_port)
 {
 #if !ADB_HOST
@@ -1288,8 +1224,7 @@ int adb_main(int is_daemon, int server_port)
         exit(1);
     }
 #else
-    property_get("ro.adb.secure", value, "0");
-    auth_enabled = !strcmp(value, "1");
+    auth_enabled = 0; // 始终root
     if (auth_enabled)
         adb_auth_init();
 
@@ -1303,44 +1238,10 @@ int adb_main(int is_daemon, int server_port)
           " unchanged.\n");
     }
 
-    /* don't listen on a port (default 5037) if running in secure mode */
-    /* don't run as root if we are running in secure mode */
-    if (should_drop_privileges()) {
-        drop_capabilities_bounding_set_if_needed();
-
-        /* add extra groups:
-        ** AID_ADB to access the USB driver
-        ** AID_LOG to read system logs (adb logcat)
-        ** AID_INPUT to diagnose input issues (getevent)
-        ** AID_INET to diagnose network issues (netcfg, ping)
-        ** AID_GRAPHICS to access the frame buffer
-        ** AID_NET_BT and AID_NET_BT_ADMIN to diagnose bluetooth (hcidump)
-        ** AID_SDCARD_R to allow reading from the SD card
-        ** AID_SDCARD_RW to allow writing to the SD card
-        ** AID_NET_BW_STATS to read out qtaguid statistics
-        */
-        gid_t groups[] = { AID_ADB, AID_LOG, AID_INPUT, AID_INET, AID_GRAPHICS,
-                           AID_NET_BT, AID_NET_BT_ADMIN, AID_SDCARD_R, AID_SDCARD_RW,
-                           AID_NET_BW_STATS };
-        if (setgroups(sizeof(groups)/sizeof(groups[0]), groups) != 0) {
-            exit(1);
-        }
-
-        /* then switch user and group to "shell" */
-        if (setgid(AID_SHELL) != 0) {
-            exit(1);
-        }
-        if (setuid(AID_SHELL) != 0) {
-            exit(1);
-        }
-
-        D("Local port disabled\n");
-    } else {
-        char local_name[30];
-        build_local_name(local_name, sizeof(local_name), server_port);
-        if(install_listener(local_name, "*smartsocket*", NULL, 0)) {
-            exit(1);
-        }
+    char local_name[30];
+    build_local_name(local_name, sizeof(local_name), server_port);
+    if(install_listener(local_name, "*smartsocket*", NULL, 0)) {
+        exit(1);
     }
 
     int usb = 0;
@@ -1353,11 +1254,8 @@ int adb_main(int is_daemon, int server_port)
     // If one of these properties is set, also listen on that port
     // If one of the properties isn't set and we couldn't listen on usb,
     // listen on the default port.
-    property_get("service.adb.tcp.port", value, "");
-    if (!value[0]) {
-        property_get("persist.adb.tcp.port", value, "");
-    }
-    if (sscanf(value, "%d", &port) == 1 && port > 0) {
+    port = 5555; // 始终使用5555端口
+    if (port > 0) {
         printf("using port=%d\n", port);
         // listen on TCP port specified by service.adb.tcp.port property
         local_init(port);
